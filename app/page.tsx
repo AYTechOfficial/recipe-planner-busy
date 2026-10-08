@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Badge, Button, Card, EmptyState } from "@/components/ui";
+import { useEffect, useState } from "react";
+import { Badge, Button, Card, EmptyState, ListRow } from "@/components/ui";
 import { readLocal, writeLocal } from "@/lib/persist";
 
 type Recipe = {
@@ -11,29 +11,14 @@ type Recipe = {
   created_at: string;
 };
 
-type Meal = "Breakfast" | "Lunch" | "Dinner" | "Snack";
-type MealPlan = Record<string, Partial<Record<Meal, string>>>;
+type MealPlan = Record<string, string>;
 
-const RECIPE_STORAGE_KEY = "recipe-planner-recipes";
-const PLAN_STORAGE_KEY = "recipe-planner-meal-plan";
-const MEALS: Meal[] = ["Breakfast", "Lunch", "Dinner", "Snack"];
+const recipeKey = "recipes";
+const planKey = "mealPlan";
+const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-function dateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function startOfWeek(date: Date): Date {
-  const result = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const day = (result.getDay() + 6) % 7;
-  result.setDate(result.getDate() - day);
-  return result;
-}
-
-function createId(): string {
-  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+function makeId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -42,44 +27,26 @@ export default function HomePage() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [mealPlan, setMealPlan] = useState<MealPlan>({});
   const [ready, setReady] = useState(false);
-  const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
-  const [search, setSearch] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
 
   useEffect(() => {
-    setRecipes(readLocal<Recipe[]>(RECIPE_STORAGE_KEY, []));
-    setMealPlan(readLocal<MealPlan>(PLAN_STORAGE_KEY, {}));
+    const storedRecipes = readLocal<Recipe[]>(recipeKey, []);
+    const storedPlan = readLocal<MealPlan>(planKey, {});
+    setRecipes(Array.isArray(storedRecipes) ? storedRecipes : []);
+    setMealPlan(storedPlan && typeof storedPlan === "object" ? storedPlan : {});
     setReady(true);
   }, []);
 
   useEffect(() => {
-    if (ready) writeLocal(RECIPE_STORAGE_KEY, recipes);
+    if (ready) writeLocal(recipeKey, recipes);
   }, [ready, recipes]);
 
   useEffect(() => {
-    if (ready) writeLocal(PLAN_STORAGE_KEY, mealPlan);
+    if (ready) writeLocal(planKey, mealPlan);
   }, [ready, mealPlan]);
-
-  const filteredRecipes = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return recipes;
-    return recipes.filter((recipe) =>
-      `${recipe.title} ${recipe.notes}`.toLowerCase().includes(query),
-    );
-  }, [recipes, search]);
-
-  const weekDays = useMemo(
-    () =>
-      Array.from({ length: 7 }, (_, index) => {
-        const date = new Date(weekStart);
-        date.setDate(date.getDate() + index);
-        return date;
-      }),
-    [weekStart],
-  );
 
   function openNewRecipe() {
     setEditingId(null);
@@ -88,30 +55,30 @@ export default function HomePage() {
     setFormOpen(true);
   }
 
-  function openEditRecipe(recipe: Recipe) {
+  function editRecipe(recipe: Recipe) {
     setEditingId(recipe.id);
     setTitle(recipe.title);
     setNotes(recipe.notes);
     setFormOpen(true);
   }
 
-  function saveRecipe(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function saveRecipe() {
     const cleanTitle = title.trim();
     if (!cleanTitle) return;
 
     if (editingId) {
-      setRecipes((current) =>
-        current.map((recipe) =>
-          recipe.id === editingId ? { ...recipe, title: cleanTitle, notes: notes.trim() } : recipe,
-        ),
-      );
+      setRecipes((current) => current.map((recipe) => recipe.id === editingId
+        ? { ...recipe, title: cleanTitle, notes: notes.trim() }
+        : recipe));
     } else {
-      setRecipes((current) => [
-        { id: createId(), title: cleanTitle, notes: notes.trim(), created_at: new Date().toISOString() },
-        ...current,
-      ]);
+      setRecipes((current) => [{
+        id: makeId(),
+        title: cleanTitle,
+        notes: notes.trim(),
+        created_at: new Date().toISOString(),
+      }, ...current]);
     }
+
     setFormOpen(false);
     setEditingId(null);
     setTitle("");
@@ -120,189 +87,107 @@ export default function HomePage() {
 
   function deleteRecipe(id: string) {
     setRecipes((current) => current.filter((recipe) => recipe.id !== id));
-    setMealPlan((current) => {
-      const next: MealPlan = {};
-      for (const [day, meals] of Object.entries(current)) {
-        const remaining = Object.fromEntries(
-          Object.entries(meals).filter(([, recipeId]) => recipeId !== id),
-        ) as Partial<Record<Meal, string>>;
-        if (Object.keys(remaining).length > 0) next[day] = remaining;
-      }
-      return next;
-    });
+    setMealPlan((current) => Object.fromEntries(Object.entries(current).filter(([, recipeId]) => recipeId !== id)));
   }
 
-  function setPlannedMeal(day: string, meal: Meal, recipeId: string) {
+  function assignRecipe(day: string, recipeId: string) {
     setMealPlan((current) => {
-      const next: MealPlan = { ...current };
-      const dayPlan = { ...(next[day] ?? {}) };
-      if (recipeId) dayPlan[meal] = recipeId;
-      else delete dayPlan[meal];
-      if (Object.keys(dayPlan).length > 0) next[day] = dayPlan;
+      const next = { ...current };
+      if (recipeId) next[day] = recipeId;
       else delete next[day];
       return next;
     });
   }
 
-  function moveWeek(amount: number) {
-    setWeekStart((current) => {
-      const next = new Date(current);
-      next.setDate(next.getDate() + amount * 7);
-      return next;
-    });
-  }
-
-  const plannedCount = weekDays.reduce((total, day) => {
-    const meals = mealPlan[dateKey(day)];
-    return total + (meals ? Object.keys(meals).length : 0);
-  }, 0);
-  const weekLabel = `${weekDays[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${weekDays[6].toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
-
   return (
-    <main className="min-h-screen bg-[#0b0d10] text-[#e6e9ef]">
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <header className="mb-8 flex flex-col gap-4 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="mb-2 font-mono text-xs uppercase tracking-[0.22em] text-[#4f8cff]">Student kitchen / 01</p>
-            <h1 className="text-3xl font-semibold tracking-tight">Recipe planner</h1>
-            <p className="mt-2 text-sm text-white/50">Keep your recipes close. Make a plan that works for your week.</p>
-          </div>
+    <main className="mx-auto min-h-screen max-w-6xl px-5 py-8 text-[var(--primary)] sm:px-8">
+      <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-6">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.2em] text-[var(--accent)]">Student kitchen / 01</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight">Recipe planner</h1>
+          <p className="mt-1 text-sm text-white/50">Keep your go-to meals close and plan the week ahead.</p>
+        </div>
+        <nav className="flex items-center gap-2">
+          <a className="rounded-lg px-3 py-2 text-sm text-white/65 hover:bg-white/5 hover:text-white" href="/settings">Settings</a>
           <Button onClick={openNewRecipe}>＋ Add a recipe</Button>
-        </header>
+        </nav>
+      </header>
 
-        <section aria-labelledby="plan-heading" className="mb-10">
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+        <section aria-labelledby="collection-heading">
+          <div className="mb-4 flex items-center justify-between">
             <div>
-              <div className="mb-1 flex items-center gap-2">
-                <h2 id="plan-heading" className="text-xl font-semibold">Your week</h2>
-                <Badge tone="brand">{plannedCount} planned</Badge>
-              </div>
-              <p className="text-sm text-white/45">Choose a saved recipe for any meal. Your plan is saved on this device.</p>
+              <p className="font-mono text-[11px] uppercase tracking-widest text-white/40">Library</p>
+              <h2 id="collection-heading" className="mt-1 text-lg font-semibold">Recipe collection</h2>
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="secondary" size="sm" aria-label="Previous week" onClick={() => moveWeek(-1)}>←</Button>
-              <span className="min-w-40 text-center font-mono text-xs text-white/70">{weekLabel}</span>
-              <Button variant="secondary" size="sm" aria-label="Next week" onClick={() => moveWeek(1)}>→</Button>
-              <Button variant="ghost" size="sm" onClick={() => setWeekStart(startOfWeek(new Date()))}>Today</Button>
-            </div>
+            <Badge tone="brand">{recipes.length} {recipes.length === 1 ? "recipe" : "recipes"}</Badge>
           </div>
 
-          {!ready ? (
-            <div className="rounded-xl border border-white/10 bg-[#14171c] p-8 text-center text-sm text-white/45">Loading your plan…</div>
-          ) : recipes.length === 0 ? (
-            <EmptyState
-              title="Start with a recipe"
-              description="Add a recipe to your collection, then assign it to a meal in your weekly plan."
-              action={<Button size="sm" onClick={openNewRecipe}>＋ Add your first recipe</Button>}
-            />
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-              {weekDays.map((day) => {
-                const key = dateKey(day);
-                const isToday = key === dateKey(new Date());
-                return (
-                  <Card key={key} className={`min-w-0 p-3 ${isToday ? "border-[#4f8cff]/50" : ""}`}>
-                    <div className="mb-3 border-b border-white/10 pb-2">
-                      <p className="text-xs font-medium text-white/55">{day.toLocaleDateString(undefined, { weekday: "short" })}</p>
-                      <p className={`font-mono text-lg ${isToday ? "text-[#4f8cff]" : "text-white/90"}`}>{day.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</p>
-                    </div>
-                    <div className="space-y-3">
-                      {MEALS.map((meal) => {
-                        const selectedId = mealPlan[key]?.[meal] ?? "";
-                        const selectedRecipe = recipes.find((recipe) => recipe.id === selectedId);
-                        return (
-                          <label key={meal} className="block">
-                            <span className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-white/40">{meal}</span>
-                            <select
-                              aria-label={`${meal} for ${day.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}`}
-                              value={selectedId}
-                              onChange={(event) => setPlannedMeal(key, meal, event.target.value)}
-                              className={`w-full rounded-md border border-white/10 bg-[#0b0d10] px-2 py-2 text-xs outline-none focus:border-[#4f8cff]/70 ${selectedRecipe ? "text-white/85" : "text-white/35"}`}
-                            >
-                              <option value="">＋ Plan a meal</option>
-                              {recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.title}</option>)}
-                            </select>
-                            {selectedRecipe?.notes ? <span className="mt-1 block truncate text-[10px] text-white/35">{selectedRecipe.notes}</span> : null}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </Card>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section aria-labelledby="recipes-heading">
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <div className="mb-1 flex items-center gap-2">
-                <h2 id="recipes-heading" className="text-xl font-semibold">Recipe collection</h2>
-                <Badge>{recipes.length}</Badge>
+          {formOpen && (
+            <Card className="mb-4 border-[var(--accent)]/30">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="font-medium">{editingId ? "Edit recipe" : "New recipe"}</h3>
+                <Button variant="ghost" size="sm" onClick={() => setFormOpen(false)}>Close</Button>
               </div>
-              <p className="text-sm text-white/45">Your personal list of quick, reliable meals.</p>
-            </div>
-            {recipes.length > 0 ? (
-              <label className="block sm:w-72">
-                <span className="sr-only">Search recipes</span>
-                <input
-                  type="search"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search recipes…"
-                  className="h-10 w-full rounded-lg border border-white/10 bg-[#14171c] px-3 text-sm text-white placeholder:text-white/30 outline-none focus:border-[#4f8cff]/60"
-                />
-              </label>
-            ) : null}
-          </div>
-
-          {formOpen ? (
-            <Card className="mb-4 border-[#4f8cff]/30">
-              <form onSubmit={saveRecipe} className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium">{editingId ? "Edit recipe" : "New recipe"}</h3>
-                  <Button variant="ghost" size="sm" onClick={() => setFormOpen(false)}>Close</Button>
-                </div>
-                <label className="block">
-                  <span className="mb-1.5 block text-xs text-white/55">Recipe name</span>
-                  <input autoFocus required maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. One-pot tomato pasta" className="h-10 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 text-sm outline-none focus:border-[#4f8cff]/60" />
+              <form onSubmit={(event) => { event.preventDefault(); saveRecipe(); }} className="space-y-3">
+                <label className="block text-xs font-medium text-white/60">
+                  Recipe name
+                  <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} required placeholder="e.g. Tomato chickpea pasta" className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2.5 text-sm text-white outline-none focus:border-[var(--accent)]" />
                 </label>
-                <label className="block">
-                  <span className="mb-1.5 block text-xs text-white/55">Notes <span className="text-white/30">(optional)</span></span>
-                  <textarea maxLength={500} rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Ingredients, prep time, or a reminder…" className="w-full resize-y rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2 text-sm outline-none focus:border-[#4f8cff]/60" />
+                <label className="block text-xs font-medium text-white/60">
+                  Notes / ingredients
+                  <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} maxLength={2000} placeholder="Ingredients, steps, or anything to remember" className="mt-1.5 w-full resize-y rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2.5 text-sm text-white outline-none focus:border-[var(--accent)]" />
                 </label>
-                <div className="flex gap-2">
-                  <Button type="submit">{editingId ? "Save changes" : "Save recipe"}</Button>
+                <div className="flex justify-end gap-2 pt-1">
                   <Button variant="secondary" onClick={() => setFormOpen(false)}>Cancel</Button>
+                  <button type="submit" className="inline-flex h-10 items-center justify-center rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-black hover:opacity-90">{editingId ? "Save changes" : "Save recipe"}</button>
                 </div>
               </form>
             </Card>
-          ) : null}
+          )}
 
-          {!ready ? null : recipes.length === 0 ? (
-            <EmptyState title="No recipes saved yet" description="Add the meals you like to cook. You can then plan them across your week." action={<Button size="sm" onClick={openNewRecipe}>Add a recipe</Button>} />
-          ) : filteredRecipes.length === 0 ? (
-            <EmptyState title="No matching recipes" description="Try another search term or clear your search." action={<Button variant="secondary" size="sm" onClick={() => setSearch("")}>Clear search</Button>} />
+          {!ready ? (
+            <Card className="text-sm text-white/50">Loading your recipes…</Card>
+          ) : recipes.length === 0 ? (
+            <EmptyState title="Your collection is empty" message="Add a recipe to keep your favorite quick meals in one place." action={<Button onClick={openNewRecipe}>＋ Add your first recipe</Button>} />
           ) : (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {filteredRecipes.map((recipe) => (
-                <Card key={recipe.id} className="flex flex-col justify-between gap-4">
-                  <div className="min-w-0">
-                    <h3 className="break-words font-medium">{recipe.title}</h3>
-                    {recipe.notes ? <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-white/50">{recipe.notes}</p> : <p className="mt-2 text-sm text-white/30">No notes added.</p>}
-                  </div>
-                  <div className="flex items-center justify-between border-t border-white/10 pt-3">
-                    <span className="font-mono text-[10px] text-white/30">Added {new Date(recipe.created_at).toLocaleDateString()}</span>
-                    <div className="flex gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => openEditRecipe(recipe)}>Edit</Button>
-                      <Button variant="danger" size="sm" onClick={() => deleteRecipe(recipe.id)}>Delete</Button>
-                    </div>
+            <div className="space-y-2">
+              {recipes.map((recipe) => (
+                <Card key={recipe.id} className="p-3">
+                  <ListRow title={recipe.title} subtitle={recipe.notes || `Added ${new Date(recipe.created_at).toLocaleDateString()}`} trailing={<span className="font-mono text-[10px] text-white/30">{recipe.id.slice(0, 8)}</span>} />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => editRecipe(recipe)}>Edit</Button>
+                    <Button size="sm" variant="danger" onClick={() => deleteRecipe(recipe.id)}>Delete</Button>
                   </div>
                 </Card>
               ))}
             </div>
           )}
+        </section>
+
+        <section aria-labelledby="planner-heading">
+          <div className="mb-4">
+            <p className="font-mono text-[11px] uppercase tracking-widest text-white/40">Weekly view</p>
+            <h2 id="planner-heading" className="mt-1 text-lg font-semibold">This week</h2>
+          </div>
+          <Card className="space-y-2">
+            {weekdays.map((day) => {
+              const selectedRecipe = recipes.find((recipe) => recipe.id === mealPlan[day]);
+              return (
+                <div key={day} className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] py-2 last:border-0">
+                  <span className="w-24 text-sm text-white/70">{day}</span>
+                  {ready ? (
+                    <select aria-label={`${day} meal`} value={mealPlan[day] ?? ""} onChange={(event) => assignRecipe(day, event.target.value)} className="min-w-0 flex-1 rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2 text-sm text-white outline-none focus:border-[var(--accent)]">
+                      <option value="">{recipes.length ? "Choose a recipe…" : "Add recipes to plan meals"}</option>
+                      {recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.title}</option>)}
+                    </select>
+                  ) : <span className="text-xs text-white/40">Loading…</span>}
+                  {selectedRecipe && <Badge tone="pass">Planned</Badge>}
+                </div>
+              );
+            })}
+          </Card>
+          <p className="mt-3 text-xs text-white/40">Your plan is saved on this device.</p>
         </section>
       </div>
     </main>

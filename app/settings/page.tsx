@@ -1,9 +1,14 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState } from "react";
-import Link from "next/link";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { Badge, Button, Card } from "@/components/ui";
 import { readLocal, writeLocal } from "@/lib/persist";
+
+type Preferences = {
+  eatingStyle: string;
+  weeklyBudget: number;
+  cookTime: string;
+};
 
 type Recipe = {
   id: string;
@@ -12,142 +17,141 @@ type Recipe = {
   created_at: string;
 };
 
-type Preferences = {
-  dietaryPreference: string;
-  weeklyBudget: string;
-  maxCookTime: string;
-};
+type MealPlan = Record<string, string>;
+type Backup = { version: number; recipes: Recipe[]; preferences: Preferences; mealPlan: MealPlan };
 
-const RECIPES_KEY = "campus-recipes-v1";
-const PREFERENCES_KEY = "campus-recipe-preferences-v1";
-const DEFAULT_PREFERENCES: Preferences = { dietaryPreference: "No preference", weeklyBudget: "50", maxCookTime: "20" };
+const preferenceKey = "preferences";
+const defaults: Preferences = { eatingStyle: "No preference", weeklyBudget: 50, cookTime: "30 minutes" };
 
-function isRecipe(value: unknown): value is Recipe {
-  if (typeof value !== "object" || value === null) return false;
-  const recipe = value as Record<string, unknown>;
-  return typeof recipe.id === "string" && typeof recipe.title === "string" && typeof recipe.notes === "string" && typeof recipe.created_at === "string";
-}
-
-function validPreferences(value: unknown): Preferences {
-  if (typeof value !== "object" || value === null) return DEFAULT_PREFERENCES;
-  const preferences = value as Record<string, unknown>;
-  return {
-    dietaryPreference: typeof preferences.dietaryPreference === "string" ? preferences.dietaryPreference : DEFAULT_PREFERENCES.dietaryPreference,
-    weeklyBudget: typeof preferences.weeklyBudget === "string" ? preferences.weeklyBudget : DEFAULT_PREFERENCES.weeklyBudget,
-    maxCookTime: typeof preferences.maxCookTime === "string" ? preferences.maxCookTime : DEFAULT_PREFERENCES.maxCookTime,
-  };
+function isRecipeList(value: unknown): value is Recipe[] {
+  return Array.isArray(value) && value.every((item) =>
+    item && typeof item === "object" &&
+    typeof item.id === "string" && typeof item.title === "string" &&
+    typeof item.notes === "string" && typeof item.created_at === "string"
+  );
 }
 
 export default function SettingsPage() {
-  const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFERENCES);
-  const [recipeCount, setRecipeCount] = useState(0);
+  const [preferences, setPreferences] = useState<Preferences>(defaults);
   const [ready, setReady] = useState(false);
   const [message, setMessage] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const storedPreferences = readLocal<unknown>(PREFERENCES_KEY, DEFAULT_PREFERENCES);
-    const storedRecipes = readLocal<unknown>(RECIPES_KEY, []);
-    setPreferences(validPreferences(storedPreferences));
-    setRecipeCount(Array.isArray(storedRecipes) ? storedRecipes.filter(isRecipe).length : 0);
+    const stored = readLocal<Preferences>(preferenceKey, defaults);
+    if (stored && typeof stored === "object") {
+      setPreferences({
+        eatingStyle: typeof stored.eatingStyle === "string" ? stored.eatingStyle : defaults.eatingStyle,
+        weeklyBudget: typeof stored.weeklyBudget === "number" ? stored.weeklyBudget : defaults.weeklyBudget,
+        cookTime: typeof stored.cookTime === "string" ? stored.cookTime : defaults.cookTime,
+      });
+    }
     setReady(true);
   }, []);
 
+  useEffect(() => {
+    if (ready) writeLocal(preferenceKey, preferences);
+  }, [ready, preferences]);
+
   function updatePreference<K extends keyof Preferences>(key: K, value: Preferences[K]) {
-    const next = { ...preferences, [key]: value };
-    setPreferences(next);
-    writeLocal(PREFERENCES_KEY, next);
+    setPreferences((current) => ({ ...current, [key]: value }));
+    setMessage("Preferences saved on this device.");
   }
 
-  function clearCollection() {
-    if (!window.confirm("Delete every saved recipe? This cannot be undone.")) return;
-    writeLocal(RECIPES_KEY, []);
-    setRecipeCount(0);
-    setMessage("Your recipe collection has been cleared.");
-  }
-
-  function exportCollection() {
-    const stored = readLocal<unknown>(RECIPES_KEY, []);
-    const recipes = Array.isArray(stored) ? stored.filter(isRecipe) : [];
-    const contents = JSON.stringify({ exportedAt: new Date().toISOString(), recipes }, null, 2);
-    const blob = new Blob([contents], { type: "application/json" });
+  function exportData() {
+    const backup: Backup = {
+      version: 1,
+      recipes: readLocal<Recipe[]>("recipes", []),
+      preferences,
+      mealPlan: readLocal<MealPlan>("mealPlan", {}),
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "campus-kitchen-recipes.json";
+    link.download = "recipe-planner-backup.json";
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setMessage(`Exported ${recipes.length} ${recipes.length === 1 ? "recipe" : "recipes"}.`);
+    setMessage("Your backup has been exported.");
   }
 
-  function importCollection(event: ChangeEvent<HTMLInputElement>) {
+  async function importData(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    event.target.value = "";
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed: unknown = JSON.parse(String(reader.result));
-        let candidate: unknown = parsed;
-        if (typeof parsed === "object" && parsed !== null && "recipes" in parsed) candidate = parsed.recipes;
-        if (!Array.isArray(candidate) || !candidate.every(isRecipe)) throw new Error("invalid file");
-        const current = readLocal<unknown>(RECIPES_KEY, []);
-        const existing = Array.isArray(current) ? current.filter(isRecipe) : [];
-        const byId = new Map(existing.map((recipe) => [recipe.id, recipe]));
-        for (const recipe of candidate) byId.set(recipe.id, recipe);
-        const merged = Array.from(byId.values());
-        writeLocal(RECIPES_KEY, merged);
-        setRecipeCount(merged.length);
-        setMessage(`Imported ${candidate.length} ${candidate.length === 1 ? "recipe" : "recipes"}.`);
-      } catch {
-        setMessage("That file could not be imported. Choose a Campus Kitchen recipe export.");
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!parsed || typeof parsed !== "object") throw new Error("Invalid backup file.");
+      const backup = parsed as Partial<Backup>;
+      if (!isRecipeList(backup.recipes)) throw new Error("This file does not contain a valid recipe collection.");
+      const importedPreferences = backup.preferences;
+      if (!importedPreferences || typeof importedPreferences.eatingStyle !== "string" || typeof importedPreferences.weeklyBudget !== "number" || typeof importedPreferences.cookTime !== "string") {
+        throw new Error("This file does not contain valid preferences.");
       }
-    };
-    reader.onerror = () => setMessage("The selected file could not be read.");
-    reader.readAsText(file);
+      const plan = backup.mealPlan && typeof backup.mealPlan === "object" && !Array.isArray(backup.mealPlan) ? backup.mealPlan : {};
+      writeLocal("recipes", backup.recipes);
+      writeLocal(preferenceKey, importedPreferences);
+      writeLocal("mealPlan", plan);
+      setPreferences(importedPreferences);
+      setMessage(`Imported ${backup.recipes.length} ${backup.recipes.length === 1 ? "recipe" : "recipes"}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not import this file.");
+    }
+    event.target.value = "";
   }
 
   return (
-    <main className="min-h-screen bg-[#0b0d10] text-[#e6e9ef]">
-      <div className="mx-auto max-w-5xl px-5 pb-16 pt-6 sm:px-8">
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5">
-          <Link href="/" className="flex items-center gap-3" aria-label="Campus Kitchen home">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-[#4f8cff]/30 bg-[#4f8cff]/10 text-[#77a8ff]"><svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true"><path d="M4 12h16M6 12a6 6 0 0 1 12 0M7 16h10M9 19h6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/><path d="M12 3v2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg></span>
-            <span><span className="block text-sm font-semibold tracking-wide">CAMPUS KITCHEN</span><span className="block text-[11px] text-white/40">A little more planned. A lot less stressed.</span></span>
-          </Link>
-          <nav className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#14171c] p-1 text-sm" aria-label="Main navigation"><Link href="/" className="rounded-md px-3 py-2 text-white/55 transition hover:bg-white/5 hover:text-white">My recipes</Link><Link href="/settings" aria-current="page" className="rounded-md bg-white/10 px-3 py-2 text-white">Settings</Link></nav>
-        </header>
-
-        <div className="mb-8 mt-9"><Badge tone="brand">PREFERENCES & DATA</Badge><h1 className="mt-3 text-3xl font-semibold tracking-tight">Make it work for you.</h1><p className="mt-2 max-w-xl text-sm leading-6 text-white/50">Set a few kitchen goals and manage the recipes saved on this device.</p></div>
-
-        <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
-          <Card className="border-white/[0.08] bg-[#14171c] p-5 sm:p-6">
-            <div className="mb-6"><p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#4f8cff]">YOUR ROUTINE</p><h2 className="mt-1 text-lg font-semibold">Cooking preferences</h2><p className="mt-1 text-xs leading-5 text-white/45">These are reminders for your planning. They stay on this device.</p></div>
-            <div className="space-y-5">
-              <label className="block"><span className="mb-1.5 block text-sm text-white/75">Eating style</span><select value={preferences.dietaryPreference} disabled={!ready} onChange={(event) => updatePreference("dietaryPreference", event.target.value)} className="h-11 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 text-sm text-white outline-none focus:border-[#4f8cff]/60"><option>No preference</option><option>Vegetarian</option><option>Vegan</option><option>Pescatarian</option><option>Gluten-free</option><option>Dairy-free</option></select></label>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="block"><span className="mb-1.5 block text-sm text-white/75">Weekly food budget</span><span className="relative block"><span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-white/40">$</span><input type="number" min="0" max="9999" value={preferences.weeklyBudget} disabled={!ready} onChange={(event) => updatePreference("weeklyBudget", event.target.value)} className="h-11 w-full rounded-lg border border-white/10 bg-[#0b0d10] pl-8 pr-3 font-mono text-sm text-white outline-none focus:border-[#4f8cff]/60" /></span></label>
-                <label className="block"><span className="mb-1.5 block text-sm text-white/75">Ideal cook time</span><span className="relative block"><input type="number" min="1" max="240" value={preferences.maxCookTime} disabled={!ready} onChange={(event) => updatePreference("maxCookTime", event.target.value)} className="h-11 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 pr-14 font-mono text-sm text-white outline-none focus:border-[#4f8cff]/60" /><span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-white/40">minutes</span></span></label>
-              </div>
-            </div>
-            <p className="mt-5 flex items-center gap-2 border-t border-white/[0.07] pt-4 text-xs text-white/40"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Saved automatically on this device</p>
-          </Card>
-
-          <Card className="border-white/[0.08] bg-[#14171c] p-5 sm:p-6">
-            <div className="mb-6"><p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#4f8cff]">YOUR DATA</p><h2 className="mt-1 text-lg font-semibold">Recipe collection</h2><p className="mt-1 text-xs leading-5 text-white/45">Your recipes are stored locally in this browser. Nothing is sent to an account or server.</p></div>
-            <div className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-black/10 px-4 py-3"><span className="text-sm text-white/65">Saved recipes</span><span className="font-mono text-lg text-white">{ready ? String(recipeCount).padStart(2, "0") : "··"}</span></div>
-            <div className="mt-4 space-y-3">
-              <Button variant="secondary" className="w-full justify-between" onClick={exportCollection} disabled={!ready}><span>Export recipe data</span><span aria-hidden="true">↓</span></Button>
-              <label className={`flex h-10 w-full cursor-pointer items-center justify-between rounded-lg border border-white/10 bg-[#0b0d10] px-4 text-sm font-medium text-white transition hover:border-white/25 ${!ready ? "pointer-events-none opacity-50" : ""}`}><span>Import recipes from file</span><span className="text-white/45" aria-hidden="true">↑</span><input type="file" accept="application/json,.json" disabled={!ready} onChange={importCollection} className="sr-only" /></label>
-              <Button variant="danger" className="w-full justify-between" onClick={clearCollection} disabled={!ready || recipeCount === 0}><span>Delete all recipes</span><span aria-hidden="true">×</span></Button>
-            </div>
-            {message ? <p role="status" className="mt-4 rounded-lg border border-[#4f8cff]/20 bg-[#4f8cff]/[0.07] px-3 py-2 text-xs text-[#a9c7ff]">{message}</p> : null}
-            <p className="mt-5 border-t border-white/[0.07] pt-4 font-mono text-[10px] leading-5 text-white/30">LOCAL STORAGE · PRIVATE TO THIS BROWSER<br />Export a backup before clearing browser data.</p>
-          </Card>
+    <main className="mx-auto min-h-screen max-w-3xl px-5 py-8 text-[var(--primary)] sm:px-8">
+      <header className="mb-8 flex items-center justify-between border-b border-white/10 pb-6">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.2em] text-[var(--accent)]">Recipe planner / settings</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight">Preferences</h1>
+          <p className="mt-1 text-sm text-white/50">Personalize your meal planning and manage your data.</p>
         </div>
-        <div className="mt-6"><Link href="/" className="inline-flex items-center gap-2 text-sm text-white/45 transition hover:text-white"><span aria-hidden="true">←</span> Back to your recipes</Link></div>
-      </div>
+        <a href="/" className="rounded-lg px-3 py-2 text-sm text-white/65 hover:bg-white/5 hover:text-white">← Recipes</a>
+      </header>
+
+      <section className="space-y-6">
+        <Card>
+          <div className="mb-5 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="font-semibold">Cooking preferences</h2>
+              <p className="mt-1 text-xs text-white/45">Used to guide your own recipe choices.</p>
+            </div>
+            <Badge tone={ready ? "pass" : "neutral"}>{ready ? "Saved locally" : "Loading"}</Badge>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <label className="text-xs font-medium text-white/60">Eating style
+              <select disabled={!ready} value={preferences.eatingStyle} onChange={(event) => updatePreference("eatingStyle", event.target.value)} className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2.5 text-sm text-white outline-none focus:border-[var(--accent)] disabled:opacity-50">
+                <option>No preference</option><option>Vegetarian</option><option>Vegan</option><option>Pescatarian</option><option>Gluten-free</option><option>Dairy-free</option>
+              </select>
+            </label>
+            <label className="text-xs font-medium text-white/60">Weekly food budget
+              <div className="mt-1.5 flex items-center rounded-lg border border-white/10 bg-[#0b0d10] px-3 focus-within:border-[var(--accent)]">
+                <span className="text-sm text-white/40">$</span>
+                <input disabled={!ready} type="number" min={0} max={1000} step={5} value={preferences.weeklyBudget} onChange={(event) => updatePreference("weeklyBudget", Math.max(0, Number(event.target.value)))} className="w-full bg-transparent px-2 py-2.5 text-sm text-white outline-none disabled:opacity-50" />
+              </div>
+            </label>
+            <label className="text-xs font-medium text-white/60">Preferred cook time
+              <select disabled={!ready} value={preferences.cookTime} onChange={(event) => updatePreference("cookTime", event.target.value)} className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0b0d10] px-3 py-2.5 text-sm text-white outline-none focus:border-[var(--accent)] disabled:opacity-50">
+                <option>15 minutes</option><option>30 minutes</option><option>45 minutes</option><option>60 minutes</option><option>Any amount of time</option>
+              </select>
+            </label>
+          </div>
+        </Card>
+
+        <Card>
+          <h2 className="font-semibold">Data management</h2>
+          <p className="mt-1 text-xs text-white/45">Recipes and preferences stay on this device. Export a backup or restore one from a JSON file.</p>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Button variant="secondary" onClick={exportData}>Export data</Button>
+            <Button variant="outline" onClick={() => fileInput.current?.click()}>Import backup</Button>
+            <input ref={fileInput} type="file" accept="application/json,.json" onChange={importData} className="hidden" />
+          </div>
+          {message && <p role="status" className="mt-3 text-xs text-white/55">{message}</p>}
+        </Card>
+      </section>
     </main>
   );
 }
